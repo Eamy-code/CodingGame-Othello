@@ -19,7 +19,7 @@ constexpr char PLAYER_ONE = '1';
 constexpr int BOARD_SIZE = 8;
 constexpr Bitboard ALL_MASK = std::numeric_limits<Bitboard>::max();
 constexpr Score INF = 1000000000000000LL;
-constexpr int PERFECT_EMPTY_LIMIT = 12;
+constexpr int PERFECT_EMPTY_LIMIT = 10;
 constexpr std::size_t MAX_TRANSPOSITION_ENTRIES = 250000;
 constexpr std::size_t MAX_PERFECT_CACHE_ENTRIES = 250000;
 
@@ -882,7 +882,7 @@ public:
         }
 
         int depth = 1;
-        const int maxDepth = 64;
+        const int maxDepth = std::min(64, std::max(1, emptyCount - PERFECT_EMPTY_LIMIT));
         Bitboard lastCompletedBestMoveBit = bestMoveBit;
         Score lastCompletedBestScore = 0;
         bool hasLastCompletedScore = false;
