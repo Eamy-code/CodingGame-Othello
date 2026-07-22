@@ -39,6 +39,7 @@ C++版では、次の手法を組み合わせています。
 
 - **序盤**: 22本の定石へ回転・反転を適用した定石辞書から着手します。
 - **中盤**: 位置、合法手数、潜在モビリティ、フロンティア石、確定石の近似などを評価して探索します。
+- **探索順**: 角を起点とする8本の有方向辺配列を使い、複数空き区間で相手の角列が伸びる危険手を後回しにします。
 - **終盤**: 空きマスが10以下の場合、終局までの完全読みを試み、最終石数差で着手を決定します。
 
 ### 4. CodinGameの実行条件への対応
@@ -102,7 +103,7 @@ flowchart LR
 ### CodinGameで実行する場合
 
 1. CodinGameの[Othello](https://www.codingame.com/multiplayer/bot-programming/othello-1)を開きます。
-2. `src/cpp/Othello_world_cup_ver_4.cpp` の内容をCodinGameのエディタへ貼り付けます。
+2. `src/cpp/Othello_world_cup_ver_5.cpp` の内容をCodinGameのエディタへ貼り付けます。
 3. 言語にC++を選択して実行します。
 4. 対戦結果を確認し、リーグ戦へ提出します。
 
