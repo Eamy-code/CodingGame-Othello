@@ -39,7 +39,7 @@ C++版では、次の手法を組み合わせています。
 
 - **序盤**: 22本の定石へ回転・反転を適用した定石辞書から着手します。
 - **中盤**: 位置、合法手数、潜在モビリティ、フロンティア石、確定石の近似などを評価して探索します。
-- **終盤**: 空きマスが11以下の場合、終局までの完全読みを試み、最終石数差で着手を決定します。
+- **終盤**: 空きマスが10以下の場合、終局までの完全読みを試み、最終石数差で着手を決定します。
 
 ### 4. CodinGameの実行条件への対応
 
@@ -56,7 +56,7 @@ flowchart LR
     A[盤面・合法手を入力] --> B[ビットボードへ変換]
     B --> C{合法な定石手があるか}
     C -->|ある| D[定石手を選択]
-    C -->|ない| E{空きマスが11以下か}
+    C -->|ない| E{空きマスが10以下か}
     E -->|はい| F[終局までの完全読み]
     E -->|いいえ| G[時間制限付き反復深化探索]
     F --> H[合法手一覧と照合]
@@ -102,7 +102,7 @@ flowchart LR
 ### CodinGameで実行する場合
 
 1. CodinGameの[Othello](https://www.codingame.com/multiplayer/bot-programming/othello-1)を開きます。
-2. `src/cpp/`にある提出対象のC++ファイルの内容をCodinGameのエディタへ貼り付けます。
+2. `src/cpp/Othello_world_cup_ver_4.cpp` の内容をCodinGameのエディタへ貼り付けます。
 3. 言語にC++を選択して実行します。
 4. 対戦結果を確認し、リーグ戦へ提出します。
 
@@ -130,35 +130,36 @@ AIを変更したときは、ローカル対戦用BATを使って旧版と新版
 
 ```text
 old_cpp_file: src\cpp\Othello_world_cup_ver_1.cpp
-new_cpp_file: src\cpp\Othello_world_cup_ver_2.cpp
-Change_Details: Remove last move position score from evaluation
+new_cpp_file: src\cpp\Othello_world_cup_ver_4.cpp
+Change_Details: Compare ver1 and current ver4
 Games: 100
 ```
 
-C++ファイルはBAT内で自動的にコンパイルされます。`Change_Details`には新版だけに加えた変更内容、`Games`には対局数を入力します。その後、旧版と新版の黒・白を1局ごとに交代しながら指定局数を実行します。対局数が偶数の場合、各AIは黒と白をそれぞれ同数担当します。
+C++ファイルはBAT内で自動的にコンパイルされます。`.cpp` を指定した場合は `-DOTHELLO_ENABLE_METRICS` を付けてビルドし、局ごとの定石利用・通常探索到達depth・完全読み完了有無を集計できるようにします。`.py` を指定した場合はコンパイルせず、レフェリーと同じPython実行環境で起動します。`Change_Details`には新版だけに加えた変更内容、`Games`には対局数を入力します。その後、旧版と新版の黒・白を1局ごとに交代しながら指定局数を実行します。対局数が偶数の場合、各AIは黒と白をそれぞれ同数担当します。
 
 ```text
 Match Information
-NEW Change: Remove last move position score from evaluation
+NEW Change: Compare ver1 and current ver4
 Games: 100
 
 Game 1
 Winner: NEW
-OLD: Color=Black, Stones=28
-NEW: Color=White, Stones=36
+OLD: Color=Black, Stones=28, BookLastMove=12, MaxDepth=9, Perfect=F
+NEW: Color=White, Stones=36, BookLastMove=14, MaxDepth=9, Perfect=T
 
 Final Summary
 OLD: Wins=3, Total Stones=274
 NEW: Wins=7, Total Stones=360
 Draws: 0
+Markdown report: test\result\Compare_ver1_and_current_ver4_20260722_173000_result.md
 ```
 
-優劣は勝数で判定します。勝数が同じ場合は全対局の総石数を比較し、総石数も同じ場合は`TIE`です。対戦ルール、時間制限、不正手の扱いなどは[ローカル対戦テスト仕様書](docs/Othello_Local_Match_Test_Specification.md)を参照してください。
+`BookLastMove` はその局で定石を使えた最終手数、`MaxDepth` は通常探索で完了した最大depth、`Perfect` は終局までの完全読みを1回以上完了できたかを表します。計測ログを出さないAIではこれらは `N/A` になります。実行後はコンソール表示に加えて、`test/result/` 配下へMarkdownレポートを保存します。優劣は勝数で判定し、勝数が同じ場合は全対局の総石数を比較し、総石数も同じ場合は`TIE`です。対戦ルール、時間制限、不正手の扱いなどは[ローカル対戦テスト仕様書](docs/Othello_Local_Match_Test_Specification.md)を参照してください。
 
 ### ローカルでC++版をコンパイルする場合
 
 ```powershell
-g++ -std=c++17 -O2 -o othello_ai.exe src\cpp\Othello_world_cup_ver_2.cpp
+g++ -std=c++17 -O2 -o othello_ai.exe src\cpp\Othello_world_cup_ver_4.cpp
 ```
 
 本プログラムはCodinGame形式の対話的な標準入力を前提としています。そのため、単独で起動しても対局画面は表示されません。入出力の詳細は共通ルール・入出力仕様書を参照してください。
