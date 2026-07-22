@@ -66,6 +66,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+test/result/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

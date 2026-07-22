@@ -16,9 +16,15 @@ if not defined NEW_RELATIVE_PATH (
     exit /b 1
 )
 
-set /p "NEW_CHANGE=new_change: "
-if not defined NEW_CHANGE (
+set /p "Change_Details=Change_Details: "
+if not defined Change_Details (
     echo ERROR: NEW change description is required.
+    exit /b 1
+)
+
+set /p "MATCH_GAMES=Games: "
+if not defined MATCH_GAMES (
+    echo ERROR: Games is required.
     exit /b 1
 )
 
@@ -27,6 +33,7 @@ set "NEW_RELATIVE_PATH=%NEW_RELATIVE_PATH:"=%"
 for %%I in ("%REPO_ROOT%\%OLD_RELATIVE_PATH%") do set "OLD_SOURCE=%%~fI"
 for %%I in ("%REPO_ROOT%\%NEW_RELATIVE_PATH%") do set "NEW_SOURCE=%%~fI"
 set "BUILD_DIR=%TEST_DIR%build"
+set "RESULT_DIR=%TEST_DIR%result"
 set "OLD_BOT=%BUILD_DIR%\old_bot.exe"
 set "NEW_BOT=%BUILD_DIR%\new_bot.exe"
 set "CXX=g++"
@@ -53,17 +60,31 @@ if errorlevel 1 (
 )
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+if not exist "%RESULT_DIR%" mkdir "%RESULT_DIR%"
 
 pushd "%REPO_ROOT%"
 call :prepare_bot OLD "%OLD_SOURCE%" "test\build\old_bot.exe"
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    popd
+    exit /b 1
+)
 
 call :prepare_bot NEW "%NEW_SOURCE%" "test\build\new_bot.exe"
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    popd
+    exit /b 1
+)
 popd
 
 echo.
-python "%TEST_DIR%src\othello_match_runner.py" --old "%OLD_BOT%" --new "%NEW_BOT%" --new-change "%NEW_CHANGE%" --games 20
+python "%TEST_DIR%src\othello_match_runner.py" ^
+    --old "%OLD_BOT%" ^
+    --new "%NEW_BOT%" ^
+    --old-source "%OLD_RELATIVE_PATH%" ^
+    --new-source "%NEW_RELATIVE_PATH%" ^
+    --new-change "%Change_Details%" ^
+    --games "%MATCH_GAMES%" ^
+    --result-dir "%RESULT_DIR%"
 exit /b %errorlevel%
 
 :prepare_bot
@@ -88,8 +109,8 @@ if /I "%CXX%"=="g++" (
     )
 )
 
-echo Compiling %~1 bot...
-"%CXX%" -std=c++17 -O2 "%~2" -o "%~3"
+echo Compiling %~1 bot with local metrics...
+"%CXX%" -std=c++17 -O2 -DOTHELLO_ENABLE_METRICS "%~2" -o "%~3"
 if errorlevel 1 (
     echo ERROR: Failed to compile %~1 bot.
     exit /b 1
