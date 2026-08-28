@@ -20,6 +20,7 @@ constexpr int BOARD_SIZE = 8;
 constexpr Bitboard ALL_MASK = std::numeric_limits<Bitboard>::max();
 constexpr Score INF = 1000000000000000LL;
 constexpr int PERFECT_EMPTY_LIMIT = 10;
+constexpr std::uint32_t TIME_CHECK_NODE_INTERVAL = 64;
 constexpr std::size_t MAX_TRANSPOSITION_ENTRIES = 250000;
 constexpr std::size_t MAX_PERFECT_CACHE_ENTRIES = 250000;
 
@@ -59,11 +60,11 @@ constexpr Score MOBILITY_WEIGHT = 10;
 constexpr Score POTENTIAL_MOBILITY_WEIGHT = 5;
 constexpr Score FRONTIER_WEIGHT = 7;
 constexpr Score STABILITY_WEIGHT = 12;
-constexpr Score PASS_WEIGHT = 0;
+constexpr Score PASS_WEIGHT = 50;
 
 constexpr Score EDGE_WEDGE_MOVE_BONUS = 200;
 constexpr Score EDGE_WEDGE_POSITION_BONUS = 120;
-constexpr Score MULTI_EMPTY_EDGE_GAP_MOVE_PENALTY = -120;
+constexpr Score MULTI_EMPTY_EDGE_GAP_MOVE_PENALTY = -160;
 
 constexpr int EMPTY_CORNER_C_WEIGHT = -20;
 constexpr int EMPTY_CORNER_X_WEIGHT = -40;
@@ -462,23 +463,21 @@ public:
         Bitboard playerBits = playerBoard(player);
         Bitboard opponentBits = opponentBoard(player);
         Bitboard emptyBits = ~(playerBits | opponentBits);
-        Bitboard moves = 0;
-
-        for (ShiftFunction shiftFunction : SHIFT_FUNCTIONS) {
-            Bitboard candidates = shiftFunction(playerBits) & opponentBits;
-
-            for (int repeat = 0; repeat < 5; ++repeat) {
-                candidates |= shiftFunction(candidates) & opponentBits;
-            }
-            moves |= shiftFunction(candidates) & emptyBits;
-        }
-        return moves;
+        return legalMovesForDirection<shiftNorth>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftSouth>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftEast>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftWest>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftNorthEast>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftNorthWest>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftSouthEast>(playerBits, opponentBits, emptyBits)
+            | legalMovesForDirection<shiftSouthWest>(playerBits, opponentBits, emptyBits);
     }
 
     // 合法手ビットボードを1手ずつのビット配列へ分解します。
     std::vector<Bitboard> getLegalMoveBitsList(char player) const {
         Bitboard movesBits = legalMovesBits(player);
         std::vector<Bitboard> legalMoveBits;
+        legalMoveBits.reserve(__builtin_popcountll(movesBits));
 
         while (movesBits != 0) {
             Bitboard moveBit = movesBits & (~movesBits + 1ULL);
@@ -489,12 +488,12 @@ public:
     }
 
     // 1方向について、指定手で反転できる相手石を求めます。
-    Bitboard getFlipsForDirection(
+    template<ShiftFunction shiftFunction>
+    static Bitboard getFlipsForDirection(
         Bitboard moveBit,
-        ShiftFunction shiftFunction,
         Bitboard playerBits,
         Bitboard opponentBits
-    ) const {
+    ) {
         Bitboard captured = 0;
         Bitboard current = shiftFunction(moveBit) & opponentBits;
 
@@ -521,12 +520,14 @@ public:
 
         Bitboard playerBits = playerBoard(player);
         Bitboard opponentBits = opponentBoard(player);
-        Bitboard flips = 0;
-
-        for (ShiftFunction shiftFunction : SHIFT_FUNCTIONS) {
-            flips |= getFlipsForDirection(moveBit, shiftFunction, playerBits, opponentBits);
-        }
-        return flips;
+        return getFlipsForDirection<shiftNorth>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftSouth>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftEast>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftWest>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftNorthEast>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftNorthWest>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftSouthEast>(moveBit, playerBits, opponentBits)
+            | getFlipsForDirection<shiftSouthWest>(moveBit, playerBits, opponentBits);
     }
 
     // 手を盤面へ適用し、undo用の更新内容を返します。
@@ -552,6 +553,20 @@ public:
             whiteBoard &= ~(moveRecord.moveBit | moveRecord.flipsMask);
             blackBoard |= moveRecord.flipsMask;
         }
+    }
+
+private:
+    template<ShiftFunction shiftFunction>
+    static Bitboard legalMovesForDirection(
+        Bitboard playerBits,
+        Bitboard opponentBits,
+        Bitboard emptyBits
+    ) {
+        Bitboard candidates = shiftFunction(playerBits) & opponentBits;
+        for (int repeat = 0; repeat < 5; ++repeat) {
+            candidates |= shiftFunction(candidates) & opponentBits;
+        }
+        return shiftFunction(candidates) & emptyBits;
     }
 };
 
@@ -1128,13 +1143,16 @@ private:
     Evaluator evaluator;
     Clock::time_point endTime;
     bool timedOut;
+    std::uint32_t nodesUntilTimeCheck;
     std::unordered_map<PerfectCacheKey, PerfectCacheEntry, PerfectCacheKeyHash> perfectCache;
     std::unordered_map<TranspositionKey, TranspositionEntry, TranspositionKeyHash> transpositionTable;
 
 public:
     // AIが担当するプレイヤーを設定して探索器を初期化します。
     explicit MiniMaxOthelloAi(int playerId)
-        : player(static_cast<char>('0' + playerId)), timedOut(false) {
+        : player(static_cast<char>('0' + playerId)),
+          timedOut(false),
+          nodesUntilTimeCheck(0) {
         transpositionTable.reserve(131072);
         perfectCache.reserve(131072);
     }
@@ -1142,6 +1160,16 @@ public:
     // 現在時刻が探索終了時刻へ到達したか判定します。
     bool isTimeUp() const {
         return Clock::now() >= endTime;
+    }
+
+    // 再帰探索では時刻取得を一定ノード間隔に抑えます。
+    bool isSearchTimeUp() {
+        if (nodesUntilTimeCheck > 0) {
+            --nodesUntilTimeCheck;
+            return false;
+        }
+        nodesUntilTimeCheck = TIME_CHECK_NODE_INTERVAL - 1;
+        return isTimeUp();
     }
 
     // 保存済み最善手を先頭にし、残りを探索順スコアの高い順へ並べ替えます。
@@ -1152,6 +1180,7 @@ public:
         Bitboard preferredMoveBit = 0
     ) const {
         std::vector<std::pair<Bitboard, Score>> scoredMoves;
+        scoredMoves.reserve(moveBits.size());
         for (Bitboard moveBit : moveBits) {
             scoredMoves.push_back({
                 moveBit,
@@ -1194,6 +1223,7 @@ public:
         }
 
         std::vector<Bitboard> legalMoveBits;
+        legalMoveBits.reserve(legalActions.size());
         for (const std::string& action : legalActions) {
             legalMoveBits.push_back(actionToBit(action));
         }
@@ -1210,6 +1240,7 @@ public:
             std::chrono::duration<double>(timeLimitSeconds)
         );
         timedOut = false;
+        nodesUntilTimeCheck = 0;
 
         // 前の手番で作成した有効なキャッシュは再利用し、肥大化した場合だけ破棄します。
         if (transpositionTable.size() >= MAX_TRANSPOSITION_ENTRIES) {
@@ -1500,12 +1531,17 @@ private:
                     || boundType == BoundType::EXACT));
 
         if (shouldReplace) {
-            transpositionTable[cacheKey] = TranspositionEntry{
+            TranspositionEntry entry{
                 depth,
                 score,
                 bestMoveBit,
                 boundType
             };
+            if (cacheIterator == transpositionTable.end()) {
+                transpositionTable.emplace(cacheKey, entry);
+            } else {
+                cacheIterator->second = entry;
+            }
         }
     }
 
@@ -1528,12 +1564,17 @@ private:
 
         if (cacheIterator == transpositionTable.end()
             || depth >= cacheIterator->second.searchedDepth) {
-            transpositionTable[cacheKey] = TranspositionEntry{
+            TranspositionEntry entry{
                 depth,
                 score,
                 0,
                 BoundType::EXACT
             };
+            if (cacheIterator == transpositionTable.end()) {
+                transpositionTable.emplace(cacheKey, entry);
+            } else {
+                cacheIterator->second = entry;
+            }
         }
     }
 
@@ -1560,7 +1601,12 @@ private:
         if (cacheIterator == perfectCache.end()
             || cacheIterator->second.boundType != BoundType::EXACT
             || boundType == BoundType::EXACT) {
-            perfectCache[cacheKey] = PerfectCacheEntry{score, bestMoveBit, boundType};
+            PerfectCacheEntry entry{score, bestMoveBit, boundType};
+            if (cacheIterator == perfectCache.end()) {
+                perfectCache.emplace(cacheKey, entry);
+            } else {
+                cacheIterator->second = entry;
+            }
         }
     }
 
@@ -1575,7 +1621,7 @@ private:
         int myPassCount,
         int opponentPassCount
     ) {
-        if (isTimeUp()) {
+        if (isSearchTimeUp()) {
             timedOut = true;
             return evaluator.evaluateAll(
                 board,
@@ -1681,11 +1727,6 @@ private:
             bool isFirstMove = true;
 
             for (Bitboard moveBit : legalMoveBits) {
-                if (isTimeUp()) {
-                    timedOut = true;
-                    break;
-                }
-
                 MoveRecord moveRecord = board.applyMoveBit(moveBit, currentPlayer);
                 Score score;
 
@@ -1759,11 +1800,6 @@ private:
         bool isFirstMove = true;
 
         for (Bitboard moveBit : legalMoveBits) {
-            if (isTimeUp()) {
-                timedOut = true;
-                break;
-            }
-
             MoveRecord moveRecord = board.applyMoveBit(moveBit, currentPlayer);
             Score score;
 
@@ -1841,7 +1877,7 @@ private:
         Score alpha,
         Score beta
     ) {
-        if (isTimeUp()) {
+        if (isSearchTimeUp()) {
             timedOut = true;
             return finalScore(board, rootPlayer);
         }
@@ -1905,11 +1941,6 @@ private:
             Bitboard bestMoveBit = 0;
 
             for (Bitboard moveBit : legalMoveBits) {
-                if (isTimeUp()) {
-                    timedOut = true;
-                    break;
-                }
-
                 MoveRecord moveRecord = board.applyMoveBit(moveBit, currentPlayer);
                 Score score = perfectPlay(board, opponentPlayer, rootPlayer, alpha, beta);
                 board.undoMove(moveRecord);
@@ -1943,11 +1974,6 @@ private:
         Score bestScore = INF;
         Bitboard bestMoveBit = 0;
         for (Bitboard moveBit : legalMoveBits) {
-            if (isTimeUp()) {
-                timedOut = true;
-                break;
-            }
-
             MoveRecord moveRecord = board.applyMoveBit(moveBit, currentPlayer);
             Score score = perfectPlay(board, opponentPlayer, rootPlayer, alpha, beta);
             board.undoMove(moveRecord);
