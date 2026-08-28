@@ -6,12 +6,12 @@ CodinGameの対戦型プログラミングゲーム「[Othello](https://www.codi
 
 ## 対戦実績
 
-- 最高順位: **44位 / 629人中（上位約7.0%）**
+- 最高順位: **39位 / 637人中（上位約6.2%）**
 - Tier: **Wood 1**
-- 記録日: **2026年7月22日**
+- 記録日: **2026年8月28日**
 - 使用言語: **C++**
 
-![CodinGame Othelloランキング44位の記録](ranking_evidence_img/rank_44.png)
+![CodinGame Othelloランキング39位の記録](ranking_evidence_img/rank_39.png)
 
 順位は参加者数や対戦結果によって変動するため、本リポジトリでは取得時点の画像を記録として保存しています。
 
