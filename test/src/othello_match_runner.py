@@ -1,4 +1,5 @@
 import argparse
+import json
 import queue
 import re
 import subprocess
@@ -133,6 +134,7 @@ class BotProcess:
         self.expert_mode = False
         self.output_lines: queue.Queue[str | None] = queue.Queue()
         self.metrics: dict[int, TurnMetric] = {}
+        self.stderr_by_turn: dict[int, list[str]] = {}
         self.metrics_lock = threading.Lock()
         self.current_request_turn = 0
 
@@ -179,6 +181,7 @@ class BotProcess:
             with self.metrics_lock:
                 if explicit_match is not None:
                     turn = int(explicit_match.group(1))
+                    self.stderr_by_turn.setdefault(turn, []).append(line)
                     self.metrics[turn] = TurnMetric(
                         turn=turn,
                         used_book=explicit_match.group(2) == "1",
@@ -189,6 +192,7 @@ class BotProcess:
 
                 # ver.1 / ver.2など既存デバッグログにも可能な範囲で対応します。
                 turn = self.current_request_turn
+                self.stderr_by_turn.setdefault(turn, []).append(line)
                 if turn <= 0:
                     continue
                 metric = self._metric_for_turn(turn)
@@ -213,7 +217,7 @@ class BotProcess:
         board: list[list[str]],
         actions: list[str],
         opponent_history: list[str],
-    ) -> tuple[str | None, str | None, int]:
+    ) -> tuple[str | None, str | None, int, float, str]:
         input_lines = ["".join(row) for row in board]
         if self.expert_mode:
             input_lines.append("".join(f"{action};" for action in opponent_history))
@@ -234,34 +238,34 @@ class BotProcess:
             self._write("\n".join(input_lines) + "\n")
             output_line = self.output_lines.get(timeout=timeout)
         except queue.Empty:
-            return None, "TIMEOUT", request_turn
+            return None, "TIMEOUT", request_turn, time.perf_counter() - start_time, ""
         except (BrokenPipeError, OSError):
-            return None, "PROCESS_ERROR", request_turn
+            return None, "PROCESS_ERROR", request_turn, time.perf_counter() - start_time, ""
 
         elapsed = time.perf_counter() - start_time
         if elapsed > timeout:
-            return None, "TIMEOUT", request_turn
+            return None, "TIMEOUT", request_turn, elapsed, output_line or ""
         if output_line is None:
-            return None, "PROCESS_EXITED", request_turn
+            return None, "PROCESS_EXITED", request_turn, elapsed, ""
 
         self.action_count += 1
         tokens = output_line.strip().split()
         if not tokens:
-            return None, "EMPTY_OUTPUT", request_turn
+            return None, "EMPTY_OUTPUT", request_turn, elapsed, output_line
 
         if tokens[0] == "EXPERT":
             if len(tokens) < 2:
-                return None, "INVALID_OUTPUT", request_turn
+                return None, "INVALID_OUTPUT", request_turn, elapsed, output_line
             self.expert_mode = True
             action = tokens[1].lower()
         else:
             action = tokens[0].lower()
 
         if action == "pass":
-            return None, "PASS_OUTPUT", request_turn
+            return None, "PASS_OUTPUT", request_turn, elapsed, output_line
         if action not in actions:
-            return None, "ILLEGAL_MOVE", request_turn
-        return action, None, request_turn
+            return None, "ILLEGAL_MOVE", request_turn, elapsed, output_line
+        return action, None, request_turn, elapsed, output_line
 
     def close(self) -> None:
         if self.process.poll() is None:
@@ -271,7 +275,7 @@ class BotProcess:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=1.0)
-        self.stderr_thread.join(timeout=0.2)
+        self.stderr_thread.join()
 
     def summarize(self, move_numbers_by_turn: dict[int, int]) -> BotGameSummary:
         with self.metrics_lock:
@@ -302,6 +306,8 @@ class GameResult:
     stones: dict[str, int]
     reason: str
     analytics: dict[str, BotGameSummary] = field(default_factory=dict)
+    final_board: list[str] = field(default_factory=list)
+    turns: list[dict[str, object]] = field(default_factory=list)
 
 
 def play_game(old_executable: Path, new_executable: Path, old_color: str) -> GameResult:
@@ -317,6 +323,7 @@ def play_game(old_executable: Path, new_executable: Path, old_color: str) -> Gam
     board = initial_board()
     current_player = BLACK
     placed_move_number = 0
+    turns: list[dict[str, object]] = []
     forfeit_reason: str | None = None
     forfeiting_player: str | None = None
 
@@ -327,13 +334,49 @@ def play_game(old_executable: Path, new_executable: Path, old_color: str) -> Gam
             if not actions:
                 if not legal_actions(board, opponent):
                     break
+                turns.append({
+                    "turn": len(turns) + 1,
+                    "move_number": placed_move_number,
+                    "player": labels_by_color[current_player],
+                    "color": color_name(current_player),
+                    "board_before": ["".join(row) for row in board],
+                    "legal_actions": [],
+                    "action": "PASS",
+                    "automatic_pass": True,
+                    "elapsed_seconds": 0.0,
+                    "opponent_history": [],
+                    "board_after": ["".join(row) for row in board],
+                })
                 pending_history[opponent].append("pass")
                 current_player = opponent
                 continue
 
             history = pending_history[current_player]
             pending_history[current_player] = []
-            action, error, bot_turn = bots[current_player].request_action(board, actions, history)
+            board_before = ["".join(row) for row in board]
+            expert_mode_input = bots[current_player].expert_mode
+            action, error, bot_turn, elapsed, raw_output = bots[current_player].request_action(
+                board, actions, history
+            )
+            turn_record: dict[str, object] = {
+                "turn": len(turns) + 1,
+                "move_number": placed_move_number + 1,
+                "request_turn": bot_turn,
+                "expert_mode_input": expert_mode_input,
+                "player": labels_by_color[current_player],
+                "color": color_name(current_player),
+                "board_before": board_before,
+                "legal_actions": list(actions),
+                "action": action,
+                "error": error,
+                "automatic_pass": False,
+                "elapsed_seconds": round(elapsed, 6),
+                "opponent_history": list(history),
+                "raw_output": raw_output.rstrip("\r\n"),
+                "board_after": board_before,
+                "flipped": [],
+            }
+            turns.append(turn_record)
             if error is not None or action is None:
                 forfeit_reason = error or "INVALID_OUTPUT"
                 forfeiting_player = current_player
@@ -342,7 +385,10 @@ def play_game(old_executable: Path, new_executable: Path, old_color: str) -> Gam
             placed_move_number += 1
             label = labels_by_color[current_player]
             move_numbers_by_label[label][bot_turn] = placed_move_number
+            flips = flips_for_move(board, action, current_player)
             apply_move(board, action, current_player)
+            turn_record["flipped"] = [position_to_action(row, column) for row, column in flips]
+            turn_record["board_after"] = ["".join(row) for row in board]
             pending_history[opponent].append(action)
             current_player = opponent
     finally:
@@ -357,6 +403,21 @@ def play_game(old_executable: Path, new_executable: Path, old_color: str) -> Gam
         "OLD": count_stones(board, old_color),
         "NEW": count_stones(board, new_color),
     }
+    for turn_record in turns:
+        if turn_record["automatic_pass"]:
+            continue
+        label = str(turn_record["player"])
+        color = BLACK if turn_record["color"] == "Black" else WHITE
+        bot = bots[color]
+        request_turn = int(turn_record["request_turn"])
+        if request_turn is not None:
+            metric = bot.metrics.get(request_turn)
+            turn_record["search_metrics"] = None if metric is None else {
+                "used_book": metric.used_book,
+                "max_depth": metric.max_depth,
+                "perfect_completed": metric.perfect_completed,
+            }
+            turn_record["stderr"] = bot.stderr_by_turn.get(request_turn, [])
 
     if forfeiting_player is not None:
         loser_label = labels_by_color[forfeiting_player]
@@ -368,10 +429,13 @@ def play_game(old_executable: Path, new_executable: Path, old_color: str) -> Gam
             stones,
             forfeit_reason or "FORFEIT",
             analytics,
+            ["".join(row) for row in board],
+            turns,
         )
 
     if stones["OLD"] == stones["NEW"]:
-        return GameResult(None, None, colors, stones, "DRAW", analytics)
+        return GameResult(None, None, colors, stones, "DRAW", analytics,
+                          ["".join(row) for row in board], turns)
 
     if stones["OLD"] > stones["NEW"]:
         winner_label = "OLD"
@@ -381,7 +445,8 @@ def play_game(old_executable: Path, new_executable: Path, old_color: str) -> Gam
         loser_label = "NEW"
     else:
         loser_label = "OLD"
-    return GameResult(winner_label, loser_label, colors, stones, "STONE_COUNT", analytics)
+    return GameResult(winner_label, loser_label, colors, stones, "STONE_COUNT", analytics,
+                      ["".join(row) for row in board], turns)
 
 
 def metric_text(value: int | None, available: bool) -> str:
@@ -409,32 +474,13 @@ def sanitize_filename_component(value: str) -> str:
     return sanitized
 
 
-def print_game_result(game_number: int, result: GameResult) -> None:
-    print(f"Game {game_number}")
-    if result.winner_label is None:
-        print("Result: Draw")
-    else:
-        print(f"Winner: {result.winner_label}")
-    for label in ("OLD", "NEW"):
-        summary = result.analytics[label]
-        print(
-            f"{label}: Color={color_name(result.colors[label])}, "
-            f"Stones={result.stones[label]}, "
-            f"BookLastMove={metric_text(summary.book_last_move, summary.metric_available)}, "
-            f"MaxDepth={summary.max_depth if summary.metric_available else 'N/A'}, "
-            f"Perfect={bool_text(summary.perfect_completed, summary.metric_available)}"
-        )
-    if result.reason not in ("STONE_COUNT", "DRAW"):
-        print(f"Reason: {result.reason}")
-    print()
-
-
 def create_markdown_report(
     results: list[GameResult],
     arguments: argparse.Namespace,
     wins: dict[str, int],
     total_stones: dict[str, int],
     draws: int,
+    trace_filename: str,
 ) -> str:
     generated_at = datetime.now().astimezone()
     lines = [
@@ -450,8 +496,8 @@ def create_markdown_report(
         "",
         "## Final Summary",
         "",
-        "| Bot | Wins | Total Stones | 最大通常depth | 完全読み成功局数 |",
-        "|---|---:|---:|---:|---:|",
+        "| Bot | Wins | Total Stones | Black Wins/Stones | White Wins/Stones | 最大通常depth | 完全読み成功局数 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
 
     for label in ("OLD", "NEW"):
@@ -470,6 +516,10 @@ def create_markdown_report(
             perfect_text = "N/A"
         lines.append(
             f"| {label} | {wins[label]} | {total_stones[label]} | "
+            f"{sum(1 for result in results if result.winner_label == label and result.colors[label] == BLACK)}/"
+            f"{sum(result.stones[label] for result in results if result.colors[label] == BLACK)} | "
+            f"{sum(1 for result in results if result.winner_label == label and result.colors[label] == WHITE)}/"
+            f"{sum(result.stones[label] for result in results if result.colors[label] == WHITE)} | "
             f"{depth_text} | {perfect_text} |"
         )
 
@@ -497,6 +547,7 @@ def create_markdown_report(
         "- 最大通常depth: 完全読みではないMinimaxで完了した最大depth",
         "- 完全読み: 終局までの完全探索を1回以上完了できたか（T/F）",
         "- N/A: 対象AIが計測ログを出力していないため取得不可",
+        f"- 全手の盤面・合法手・応答時間・標準エラー: `{trace_filename}` に保存",
         "",
     ])
 
@@ -523,7 +574,95 @@ def create_markdown_report(
                 f"{bool_text(summary.perfect_completed, summary.metric_available)} |"
             )
         lines.append("")
+        lines.extend([
+            "#### 最終盤面",
+            "",
+            "```text",
+            "  a b c d e f g h",
+        ])
+        for row_index, row in enumerate(result.final_board, start=1):
+            lines.append(f"{row_index} " + " ".join(row))
+        lines.extend(["```", "", "#### 着手一覧", "", "| 手数 | 手番 | 色 | 着手 | 所要時間(秒) | 結果 |", "|---:|---|---|---|---:|---|"])
+        for turn in result.turns:
+            if turn["automatic_pass"]:
+                action_text = "自動パス"
+                elapsed_text = "-"
+                result_text = ""
+            else:
+                action_text = str(turn["action"] or "出力なし")
+                elapsed_text = f"{float(turn['elapsed_seconds']):.6f}"
+                result_text = str(turn["error"] or "")
+            lines.append(
+                f"| {turn['move_number']} | {turn['player']} | {turn['color']} | "
+                f"{action_text} | {elapsed_text} | {result_text} |"
+            )
+        for turn in result.turns:
+            action_text = "自動パス" if turn["automatic_pass"] else (
+                turn["action"] or turn["error"] or "出力なし"
+            )
+            lines.extend([
+                "",
+                f"<details><summary>手番 {turn['turn']}・手数 {turn['move_number']} "
+                f"{turn['player']}（{turn['color']}）: {action_text}</summary>",
+                "",
+            ])
+            if turn["automatic_pass"]:
+                lines.append("合法手がないため自動パスしました。")
+            else:
+                lines.extend([
+                    f"- 応答時間: {float(turn['elapsed_seconds']):.6f} 秒",
+                    f"- 合法手: {', '.join(turn['legal_actions'])}",
+                    f"- 反転石: {', '.join(turn['flipped']) or 'なし'}",
+                    f"- EXPERT入力: {'はい' if turn['expert_mode_input'] else 'いいえ'}",
+                    f"- 相手履歴: {';'.join(turn['opponent_history']) or 'なし'}",
+                    f"- AI出力: {turn['raw_output'] or 'なし'}",
+                    f"- 結果: {turn['error'] or '正常'}",
+                ])
+                search_metrics = turn.get("search_metrics")
+                if search_metrics is None:
+                    lines.append("- 探索メトリクス: 取得できませんでした")
+                else:
+                    lines.append(
+                        "- 探索メトリクス: "
+                        f"定石={search_metrics['used_book']}、"
+                        f"最大深度={search_metrics['max_depth']}、"
+                        f"完全読み完了={search_metrics['perfect_completed']}"
+                    )
+            lines.extend(["", "着手前盤面:", "", "```text", "  a b c d e f g h"])
+            for row_index, row in enumerate(turn["board_before"], start=1):
+                lines.append(f"{row_index} " + " ".join(row))
+            lines.extend(["```", "", "着手後盤面:", "", "```text", "  a b c d e f g h"])
+            for row_index, row in enumerate(turn["board_after"], start=1):
+                lines.append(f"{row_index} " + " ".join(row))
+            stderr_lines = turn.get("stderr", [])
+            if stderr_lines:
+                lines.extend(["", "標準エラーログ:", "", "```text", *stderr_lines, "```"])
+            lines.extend(["", "</details>"])
+        lines.append("")
     return "\n".join(lines) + "\n"
+
+
+def create_trace_data(
+    results: list[GameResult],
+    arguments: argparse.Namespace,
+) -> dict[str, object]:
+    games = []
+    for game_number, result in enumerate(results, start=1):
+        games.append({
+            "game": game_number,
+            "winner": result.winner_label,
+            "reason": result.reason,
+            "colors": result.colors,
+            "stones": result.stones,
+            "final_board": result.final_board,
+            "turns": result.turns,
+        })
+    return {
+        "old_source": str(arguments.old_source),
+        "new_source": str(arguments.new_source),
+        "new_change": str(arguments.new_change),
+        "games": games,
+    }
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -562,7 +701,6 @@ def main() -> int:
             old_color = WHITE
         result = play_game(old_executable, new_executable, old_color)
         results.append(result)
-        print_game_result(game_index + 1, result)
 
         if result.winner_label is None:
             draws += 1
@@ -580,9 +718,15 @@ def main() -> int:
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     change_details = sanitize_filename_component(arguments.new_change)
     report_path = arguments.result_dir / f"{change_details}_{timestamp}_result.md"
-    report = create_markdown_report(results, arguments, wins, total_stones, draws)
+    trace_path = arguments.result_dir / f"{change_details}_{timestamp}_trace.json"
+    trace = create_trace_data(results, arguments)
+    trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = create_markdown_report(
+        results, arguments, wins, total_stones, draws, trace_path.name
+    )
     report_path.write_text(report, encoding="utf-8")
     print(f"Markdown report: {report_path}")
+    print(f"Detailed trace: {trace_path}")
     return 0
 
 

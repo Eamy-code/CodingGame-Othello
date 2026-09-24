@@ -143,19 +143,15 @@ Match Information
 NEW Change: Compare ver1 and current ver4
 Games: 100
 
-Game 1
-Winner: NEW
-OLD: Color=Black, Stones=28, BookLastMove=12, MaxDepth=9, Perfect=F
-NEW: Color=White, Stones=36, BookLastMove=14, MaxDepth=9, Perfect=T
-
 Final Summary
 OLD: Wins=3, Total Stones=274
 NEW: Wins=7, Total Stones=360
 Draws: 0
 Markdown report: test\result\Compare_ver1_and_current_ver4_20260722_173000_result.md
+Detailed trace: test\result\Compare_ver1_and_current_ver4_20260722_173000_trace.json
 ```
 
-`BookLastMove` はその局で定石を使えた最終手数、`MaxDepth` は通常探索で完了した最大depth、`Perfect` は終局までの完全読みを1回以上完了できたかを表します。計測ログを出さないAIではこれらは `N/A` になります。実行後はコンソール表示に加えて、`test/result/` 配下へMarkdownレポートを保存します。優劣は勝数で判定し、勝数が同じ場合は全対局の総石数を比較し、総石数も同じ場合は`TIE`です。対戦ルール、時間制限、不正手の扱いなどは[ローカル対戦テスト仕様書](docs/Othello_Local_Match_Test_Specification.md)を参照してください。
+対局中の詳細はターミナルに出さず、`test/result/`配下のMarkdownレポートにまとめます。各局の最終盤面と着手一覧に加え、折りたたみ可能な各手の盤面、合法手、応答時間、探索ログを確認できます。JSONトレースには同じ情報を機械可読形式で保存します。着手差を同じ局面で確認する方法は[ローカル対戦テスト仕様書](docs/Othello_Local_Match_Test_Specification.md)を参照してください。優劣は勝数で判定し、勝数が同じ場合は全対局の総石数を比較し、総石数も同じ場合は`TIE`です。
 
 ### ローカルでC++版をコンパイルする場合
 
