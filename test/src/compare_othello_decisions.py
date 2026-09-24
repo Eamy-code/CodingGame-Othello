@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -13,22 +14,30 @@ TURN_TIMEOUT_SECONDS = 0.15
 class BotSession:
     def __init__(self, executable: Path, player: str) -> None:
         command = [sys.executable, str(executable)] if executable.suffix.lower() == ".py" else [str(executable)]
+        environment = os.environ.copy()
+        msys2_bin = Path(r"C:\msys64\ucrt64\bin")
+        if msys2_bin.is_dir():
+            environment["PATH"] = str(msys2_bin) + os.pathsep + environment.get("PATH", "")
         self.process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             bufsize=1,
             cwd=str(executable.parent),
+            env=environment,
         )
         self.output_lines: queue.Queue[str | None] = queue.Queue()
+        self.stderr_lines: queue.Queue[str] = queue.Queue()
         self.expert_mode = False
         self.request_count = 0
         self.reader = threading.Thread(target=self._read_output, daemon=True)
+        self.error_reader = threading.Thread(target=self._read_error, daemon=True)
         self.reader.start()
+        self.error_reader.start()
         self._write(f"{player}\n8\n")
 
     def _read_output(self) -> None:
@@ -36,6 +45,11 @@ class BotSession:
         for line in self.process.stdout:
             self.output_lines.put(line.rstrip("\r\n"))
         self.output_lines.put(None)
+
+    def _read_error(self) -> None:
+        assert self.process.stderr is not None
+        for line in self.process.stderr:
+            self.stderr_lines.put(line.rstrip("\r\n"))
 
     def _write(self, value: str) -> None:
         if self.process.stdin is None:
@@ -45,7 +59,7 @@ class BotSession:
 
     def choose(
         self, turn: dict[str, object]
-    ) -> tuple[str | None, str | None, bool]:
+    ) -> tuple[str | None, str | None, bool, list[str]]:
         input_lines = list(turn["board_before"])
         if self.expert_mode:
             history = turn.get("opponent_history", [])
@@ -59,36 +73,64 @@ class BotSession:
             self._write("\n".join(input_lines) + "\n")
             output_line = self.output_lines.get(timeout=timeout)
         except queue.Empty:
-            return None, "TIMEOUT", self.expert_mode
+            return None, "TIMEOUT", self.expert_mode, []
         except (BrokenPipeError, OSError):
-            return None, "PROCESS_ERROR", self.expert_mode
+            return None, "PROCESS_ERROR", self.expert_mode, []
 
         if output_line is None:
-            return None, "PROCESS_EXITED", self.expert_mode
+            return None, "PROCESS_EXITED", self.expert_mode, []
+        try:
+            error_lines = [self.stderr_lines.get(timeout=0.02)]
+        except queue.Empty:
+            error_lines = []
+        while True:
+            try:
+                error_lines.append(self.stderr_lines.get_nowait())
+            except queue.Empty:
+                break
         self.request_count += 1
         tokens = output_line.strip().split()
         if not tokens:
-            return None, "EMPTY_OUTPUT", self.expert_mode
+            return None, "EMPTY_OUTPUT", self.expert_mode, error_lines
         if tokens[0] == "EXPERT":
             if len(tokens) < 2:
-                return None, "INVALID_OUTPUT", self.expert_mode
+                return None, "INVALID_OUTPUT", self.expert_mode, error_lines
             self.expert_mode = True
             action = tokens[1].lower()
         else:
             action = tokens[0].lower()
         if action not in legal_actions:
-            return action, "ILLEGAL_MOVE", self.expert_mode
-        return action, None, self.expert_mode
+            return action, "ILLEGAL_MOVE", self.expert_mode, error_lines
+        return action, None, self.expert_mode, error_lines
 
     def close(self) -> None:
         if self.process.poll() is None:
-            self.process.terminate()
+            try:
+                self.process.terminate()
+            except OSError:
+                pass
             try:
                 self.process.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=1.0)
-        self.reader.join(timeout=0.2)
+        self.reader.join(timeout=2.0)
+        self.error_reader.join(timeout=2.0)
+        if self.process.stdin is not None:
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+        if self.process.stdout is not None:
+            try:
+                self.process.stdout.close()
+            except OSError:
+                pass
+        if self.process.stderr is not None:
+            try:
+                self.process.stderr.close()
+            except OSError:
+                pass
 
 
 def find_color_difference(
@@ -106,8 +148,8 @@ def find_color_difference(
         for turn in turns:
             if turn.get("automatic_pass") or turn.get("color") != color:
                 continue
-            old_action, old_error, old_expert_mode = sessions["OLD"].choose(turn)
-            new_action, new_error, new_expert_mode = sessions["NEW"].choose(turn)
+            old_action, old_error, old_expert_mode, old_logs = sessions["OLD"].choose(turn)
+            new_action, new_error, new_expert_mode, new_logs = sessions["NEW"].choose(turn)
             if (
                 old_action != new_action
                 or old_error != new_error
@@ -123,9 +165,11 @@ def find_color_difference(
                     "old_action": old_action,
                     "old_error": old_error,
                     "old_expert_mode": old_expert_mode,
+                    "old_stderr": old_logs,
                     "new_action": new_action,
                     "new_error": new_error,
                     "new_expert_mode": new_expert_mode,
+                    "new_stderr": new_logs,
                 }
             if old_error or new_error:
                 return {
@@ -138,9 +182,11 @@ def find_color_difference(
                     "old_action": old_action,
                     "old_error": old_error,
                     "old_expert_mode": old_expert_mode,
+                    "old_stderr": old_logs,
                     "new_action": new_action,
                     "new_error": new_error,
                     "new_expert_mode": new_expert_mode,
+                    "new_stderr": new_logs,
                 }
     finally:
         for session in sessions.values():
@@ -155,6 +201,12 @@ def print_difference(difference: dict[str, object]) -> None:
     )
     print(f"OLD: {difference['old_action']} ({difference['old_error'] or 'OK'})")
     print(f"NEW: {difference['new_action']} ({difference['new_error'] or 'OK'})")
+    print("OLD search log:")
+    for line in difference["old_stderr"]:
+        print(f"  {line}")
+    print("NEW search log:")
+    for line in difference["new_stderr"]:
+        print(f"  {line}")
     if difference["old_expert_mode"] != difference["new_expert_mode"]:
         print(
             "EXPERT mode: "
