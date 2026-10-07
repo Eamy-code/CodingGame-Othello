@@ -24,7 +24,9 @@
 - 各局で定石を使えた最終手数
 - 各局で通常探索が完了した最大depth
 - 各局で完全読みを1回以上完了できたか
-- 実行結果をまとめたMarkdownレポート
+- 各局の最終盤面と全着手の一覧
+- 各ターンの盤面、合法手、選択手、反転石、応答時間、探索ログ
+- 実行結果をまとめたMarkdownレポートと詳細JSON
 
 盤面を描画するGUIや人間が着手する操作機能は対象外です。
 
@@ -37,17 +39,20 @@ test/
 │  ├─ old_bot.exe
 │  └─ new_bot.exe
 ├─ result/
-│  └─ *_result.md
+│  ├─ *_result.md
+│  └─ *_trace.json
 └─ src/
-   └─ othello_match_runner.py
+   ├─ othello_match_runner.py
+   └─ compare_othello_decisions.py
 ```
 
 | ファイル・ディレクトリ | 役割 |
 |---|---|
 | `run_othello_matches.bat` | パス入力、環境確認、コンパイル、レフェリー起動を行う |
 | `othello_match_runner.py` | 盤面管理、AIプロセス管理、時間監視、勝敗判定、集計を行う |
+| `compare_othello_decisions.py` | 保存した局面を旧版・新版の両方へ同条件で入力し、最初に着手が異なる局面を表示する |
 | `test/build/` | C++版AIの一時実行ファイルを配置する |
-| `test/result/` | 対戦結果のMarkdownレポートを保存する |
+| `test/result/` | Markdownレポートと詳細な対局トレースを保存する |
 | `old_bot.exe` | 旧版C++ AIのコンパイル結果 |
 | `new_bot.exe` | 新版C++ AIのコンパイル結果 |
 
@@ -102,11 +107,13 @@ MSYS2版GCCを使用するときは、CondaなどとのDLL競合を避けるた�
 
 ### 5.3 ローカル計測ログ
 
-レフェリーはAIの標準エラーを監視し、次の情報を局ごとに集計します。
+レフェリーはAIの標準エラーをターンごとに記録し、次の情報を局ごとに集計します。
 
 - 定石を使用した最終手数
 - 通常探索で完了した最大depth
 - 完全読みを1回以上完了できたか
+
+詳細トレースには各AIターンの標準エラー行を保存します。計測メトリクス行に加え、探索深度、タイムアウト、定石選択などのデバッグログを後から確認できます。
 
 現行C++実装のように `standard=...`、`depth=...`、`perfect score=...` を出力するAIに加え、`OTHELLO_METRIC ...` 形式の明示メトリクス行にも対応します。対象AIがこれらの計測ログを出力しない場合、結果表示とMarkdownレポートでは `N/A` とします。
 
@@ -221,35 +228,11 @@ NEW Change: Remove last move position score from evaluation
 Games: 100
 ```
 
-通常の勝敗は次の形式で表示します。
-
-```text
-Game 1
-Winner: NEW
-OLD: Color=Black, Stones=28, BookLastMove=12, MaxDepth=9, Perfect=F
-NEW: Color=White, Stones=36, BookLastMove=14, MaxDepth=9, Perfect=T
-```
-
-異常による敗北では、追加で理由を表示します。
-
-```text
-Reason: TIMEOUT
-```
-
-引き分けの場合は次の形式です。
-
-```text
-Game 1
-Result: Draw
-OLD: Color=Black, Stones=32, BookLastMove=0（定石なし）, MaxDepth=9, Perfect=F
-NEW: Color=White, Stones=32, BookLastMove=0（定石なし）, MaxDepth=9, Perfect=F
-```
-
-各局の結果の後には空行を1行出力します。
+ターミナルには対局中の各局・各手の詳細を出さず、開始情報と最終集計、保存先だけを表示します。各局の結果、盤面、探索ログはMarkdownレポートとJSONトレースで確認します。
 
 ## 12. 最終集計と総合判定
 
-指定した対局数の終了後、各AIの勝数、総石数、引き分け数を表示します。
+指定した対局数の終了後、ターミナルには各AIの勝数、総石数、引き分け数と保存先を表示します。
 
 ```text
 Final Summary
@@ -257,6 +240,7 @@ OLD: Wins=3, Total Stones=274
 NEW: Wins=7, Total Stones=360
 Draws: 0
 Markdown report: test\result\Compare_ver1_and_current_ver4_20260722_173000_result.md
+Detailed trace: test\result\Compare_ver1_and_current_ver4_20260722_173000_trace.json
 ```
 
 総合判定の優先順位は次のとおりです。
@@ -265,14 +249,31 @@ Markdown report: test\result\Compare_ver1_and_current_ver4_20260722_173000_resul
 2. 勝数が同じ場合は、指定した全対局の総石数が多いAIを優れていると判定する。
 3. 勝数と総石数が同じ場合は`TIE`とする。
 
-対局終了後は、コンソール出力と同じ集計内容を含むMarkdownレポートを `test/result/` 配下へ1ファイル保存します。ファイル名は `Change_Details` をファイル名用に整形した文字列と実行時刻から生成します。
+対局終了後は、各局の勝敗・色別集計・最終盤面・着手一覧・ターンごとの詳細を含むMarkdownレポートと、全ターンの詳細を含むJSONトレースを `test/result/` 配下へ保存します。両ファイル名は `Change_Details` をファイル名用に整形した文字列と実行時刻から生成します。
+
+Markdownレポートの各ターン詳細は折りたたみ表示です。着手前後の盤面、合法手、反転石、応答時間、入力履歴、探索メトリクス、標準エラーログを確認できます。
+
+JSONトレースの各ターンには、手番番号、盤面上の着手番号、AIラベル、色、着手前盤面、合法手一覧、選択手、反転した座標、着手後盤面、応答時間、EXPERT入力モード、入力した相手履歴、AI出力、エラー、ターン別メトリクス、標準エラーログを記録します。自動パスもターンとして記録します。局面を再現するときは、対象ターンの着手前盤面・合法手・相手履歴を利用できます。
+
+旧版と新版を同じ保存局面で比較するには、対局直後に次を実行します。`--game`は1から始まる局番号です。
+
+```powershell
+python test\src\compare_othello_decisions.py `
+  --old test\build\old_bot.exe `
+  --new test\build\new_bot.exe `
+  --trace "test\result\対戦名_日時_trace.json" `
+  --game 1
+```
+
+この比較は指定局の各手を旧版・新版へ同じ順で入力し、最初に選択手またはエラーが異なった局面、合法手、盤面を表示します。対局での相手着手に沿った局面列を使うため、両AIが別々の対局で到達した局面同士を比較するものではありません。
 
 ## 13. 制約事項
 
 - 対戦数は1以上の整数を指定できます。
 - 初期局面のランダム化は行いません。
 - GUIによる盤面表示は行いません。
-- AIの標準エラーは読み捨て、通常の結果画面には表示しません。
+- AIの標準エラーはターミナルには表示せず、Markdownレポートと詳細JSONへターン別に保存します。
+- MarkdownとJSONの両方に盤面・探索情報を含みます。大量対局では結果ファイルの容量が増えます。
 - OSの負荷やプロセススケジューリングにより、同じAI同士でも探索到達深度や石数が変わる場合があります。
 - 本環境の時間計測はローカルPC上の実時間であり、CodinGame実行環境と完全に同じ性能を保証するものではありません。
 - `BookLastMove`、`MaxDepth`、`Perfect` はAIの標準エラー出力から推定しているため、計測ログ未出力のAIでは `N/A` になります。
@@ -289,4 +290,4 @@ Markdown report: test\result\Compare_ver1_and_current_ver4_20260722_173000_resul
 8. 不正手、異常終了、時間切れを敗北として処理すること。
 9. 最終集計と総合判定が表示されること。
 10. 各局で色、石数、計測項目を表示できること。
-11. 実行結果のMarkdownレポートが `test/result/` 配下へ保存されること。
+11. Markdownレポートと詳細JSONトレースが `test/result/` 配下へ保存されること。
